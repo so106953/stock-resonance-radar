@@ -1,0 +1,5 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+baostock==0.9.3
+akshare==1.18.64
+pandas==2.3.1
