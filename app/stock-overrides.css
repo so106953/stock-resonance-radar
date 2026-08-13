@@ -13,6 +13,7 @@
 .scan-strip.done { color: #6ee887; }
 .scan-strip.done:has(+ .watch-head) { letter-spacing: .01em; }
 .scan-strip.error { color: #f2c94c; }
+.scan-fail-note { padding: 6px 12px; border-bottom: 1px solid #273039; color: #f2c94c; background: rgba(242,201,76,.06); font-size: 11px; line-height: 1.45; }
 .stock-list { overflow: auto; }
 .scope-row { display: flex; align-items: center; gap: 5px; padding: 7px 10px; border-bottom: 1px solid #273039; }
 .scope-row button { border: 1px solid #2c3740; background: #0d1419; color: #929ca4; border-radius: 3px; padding: 4px 7px; font-size: 11px; cursor: pointer; }
