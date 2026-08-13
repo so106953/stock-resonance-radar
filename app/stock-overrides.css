@@ -209,3 +209,46 @@
   .equity-chart { height: 220px; }
   .signal-toast { left: 12px; right: 12px; bottom: 12px; min-width: 0; }
 }
+
+
+/* Per-section refresh feedback */
+.refresh-primary { min-width: 154px; justify-content: center; }
+.refresh-primary span { white-space: nowrap; }
+.refresh-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 16px;
+  background: #0a1118;
+  border-bottom: 1px solid #202c38;
+}
+.refresh-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid #263441;
+  border-radius: 8px;
+  color: #8391a1;
+  background: #0d161f;
+}
+.refresh-item > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.refresh-item strong { color: #dce5ee; font-size: 12px; line-height: 1.2; white-space: nowrap; }
+.refresh-item small { overflow: hidden; color: #7e8d9e; font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.refresh-state-icon { display: inline-grid; width: 17px; height: 17px; flex: 0 0 17px; place-items: center; border-radius: 50%; }
+.refresh-item.running { border-color: #2f80ed; background: rgba(47,128,237,.11); }
+.refresh-item.running .refresh-state-icon, .refresh-item.running small { color: #66a7ff; }
+.refresh-item.done .refresh-state-icon { color: #3bd17f; }
+.refresh-item.error { border-color: rgba(255,91,104,.55); }
+.refresh-item.error .refresh-state-icon, .refresh-item.error small { color: #ff6977; }
+.refresh-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: #3e92ff; box-shadow: 0 0 0 3px rgba(62,146,255,.14); animation: refreshPulse 1.1s ease-in-out infinite; }
+@keyframes refreshPulse { 50% { opacity: .35; transform: scale(.8); } }
+
+@media (max-width: 640px) {
+  .refresh-board { gap: 5px; padding: 8px 10px; }
+  .refresh-item { gap: 5px; padding: 7px 6px; }
+  .refresh-item strong { font-size: 11px; }
+  .refresh-item small { font-size: 9px; }
+  .refresh-primary { min-width: auto; }
+}
