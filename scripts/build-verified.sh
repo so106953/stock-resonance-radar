@@ -19,6 +19,10 @@ if [[ ! -x "${vinext}" ]]; then
 fi
 
 echo "Running bounded vinext build..."
+# Cloudflare Git builds may restore an older dist/ output cache. Mixing that
+# cache with a fresh vinext server build can leave HTML pointing at CSS hashes
+# that were not uploaded. Always generate one internally consistent artifact.
+rm -rf -- "${SITES_PROJECT_ROOT}/dist"
 timeout \
   --signal=TERM \
   --kill-after="${SITES_BUILD_KILL_AFTER:-10s}" \
