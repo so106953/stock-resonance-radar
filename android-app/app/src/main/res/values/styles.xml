@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.ResonanceRadar" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/radar_dark</item>
+        <item name="android:navigationBarColor">@color/radar_dark</item>
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+</resources>
