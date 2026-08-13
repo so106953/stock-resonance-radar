@@ -350,3 +350,45 @@
   .topbar .brand { font-size: 20px; }
   .topbar .refresh-primary { font-size: 13px; }
 }
+
+
+/* Show a useful batch of candidates on phones instead of only 3-5 rows. */
+@media (max-width: 800px) {
+  .watchlist {
+    min-height: 820px;
+    max-height: 980px;
+  }
+  .stock-list {
+    max-height: 660px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .stock-row {
+    height: 58px;
+    min-height: 58px;
+  }
+  .stock-row .stock-name {
+    gap: 2px;
+  }
+  .stock-row .stock-name strong {
+    font-size: 15px;
+  }
+  .stock-row .stock-name small {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 390px) {
+  .watchlist {
+    min-height: 780px;
+    max-height: 930px;
+  }
+  .stock-list {
+    max-height: 620px;
+  }
+  .stock-row {
+    height: 56px;
+    min-height: 56px;
+  }
+}
