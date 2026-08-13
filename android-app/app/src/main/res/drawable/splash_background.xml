@@ -1,0 +1,4 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item><shape><solid android:color="#080E12" /></shape></item>
+    <item android:gravity="center" android:width="120dp" android:height="120dp" android:drawable="@drawable/ic_radar" />
+</layer-list>
