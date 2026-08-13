@@ -616,7 +616,6 @@ export function App() {
             {fullScan.status === "idle" && scanSummary.state === "done" && `${clock.trading ? "盘中扫描" : "收盘后复盘"}成功：分析 ${scanSummary.scanned}/${scanSummary.attempted || scanSummary.scanned}，严格 ${scanSummary.matched}，接近 ${scanSummary.nearMatched || 0} · 完整度 ${scanSummary.completeness || 0}%`}
             {fullScan.status === "idle" && scanSummary.state === "error" && `扫描失败（不是0只命中）：${scanSummary.message}，稍后会自动重试`}
           </div>
-          {fullScan.status === "idle" && scanSummary.state === "done" && scanSummary.failed > 0 && <div className="scan-fail-note">失败 {scanSummary.failed} 只不会计入“0只命中”{scanSummary.failedDetails?.length ? ` · 示例：${scanSummary.failedDetails.slice(0, 2).map(item => `${item.code} ${item.reason}`).join("；")}` : ""}</div>}
           <button className={`filter-disclosure ${listFiltersOpen ? "open" : ""}`} aria-expanded={listFiltersOpen} onClick={() => setListFiltersOpen(value => !value)}>
             <span><strong>筛选条件</strong><small>{scanScope === "60" ? "快速60" : scanScope === "200" ? "扩展200" : "全部A股"} · {marketCapMode === "above300" ? "300亿以上" : marketCapMode === "below300" ? "300亿以内" : "全部市值"}{listMode === "confirmed" ? ` · ${closeRange === "2h" ? "最近2小时" : closeRange === "4h" ? "最近4小时" : closeRange === "week" ? "近5交易日" : "最近交易日"} · ${closeGroup === "strict" ? "符合要求" : closeGroup === "near" ? "接近满足" : "全部收盘信息"}` : ""}</small></span>
             <CaretDown size={18}/>
