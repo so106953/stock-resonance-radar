@@ -135,7 +135,7 @@ export function App() {
   const [closeArchive, setCloseArchive] = useState([]);
   const [closeRange, setCloseRange] = useState("day");
   const [marketCapMode, setMarketCapMode] = useState("all");
-  const [closeGroup, setCloseGroup] = useState("strict");
+  const [closeGroup, setCloseGroup] = useState("all");
   const [viewMode, setViewMode] = useState("simple");
   const initialAutoScan = useRef(false);
   const fullScanStop = useRef(false);
@@ -158,13 +158,14 @@ export function App() {
     const tradingDates = [...new Set(closeArchive.map(batch => batch.sessionDate).filter(Boolean))].sort().reverse();
     const allowedDates = closeRange === "day" ? tradingDates.slice(0, 1) : closeRange === "week" ? tradingDates.slice(0, 5) : [];
     const cutoff = Date.now() - ({ "2h": 2 * 3600e3, "4h": 4 * 3600e3 }[closeRange] || 0);
-    const wantedState = closeGroup === "strict" ? "confirmed" : "near-confirmed";
-    const current = signalStocks.filter(item => item.signalState === wantedState).map(item => ({ ...item, capturedAt: Date.now() }));
-    const archived = closeArchive.filter(batch => closeRange === "2h" || closeRange === "4h" ? Number(batch.capturedAt) >= cutoff : allowedDates.includes(batch.sessionDate)).flatMap(batch => (batch.items || []).filter(item => item.signalState === wantedState).map(item => ({ ...item, capturedAt: batch.capturedAt, sessionDate: batch.sessionDate })));
+    const includeGroup = item => closeGroup === "all" ? ["confirmed", "near-confirmed", "checked-confirmed"].includes(item.signalState) : closeGroup === "strict" ? item.signalState === "confirmed" : item.signalState === "near-confirmed";
+    const includeCap = item => marketCapMode === "all" || (Number(item.marketCap || 0) > 0 && (marketCapMode === "above300" ? Number(item.marketCap) >= 30000000000 : Number(item.marketCap) < 30000000000));
+    const current = signalStocks.filter(item => includeGroup(item) && includeCap(item)).map(item => ({ ...item, capturedAt: Date.now() }));
+    const archived = closeArchive.filter(batch => closeRange === "2h" || closeRange === "4h" ? Number(batch.capturedAt) >= cutoff : allowedDates.includes(batch.sessionDate)).flatMap(batch => (batch.items || []).filter(item => includeGroup(item) && includeCap(item)).map(item => ({ ...item, capturedAt: batch.capturedAt, sessionDate: batch.sessionDate })));
     const latest = new Map();
     [...current, ...archived].sort((a, b) => Number(b.capturedAt) - Number(a.capturedAt)).forEach(item => { if (!latest.has(item.code)) latest.set(item.code, item); });
     return [...latest.values()].sort((a, b) => Number(b.score) - Number(a.score));
-  }, [signalStocks, closeArchive, closeRange, closeGroup]);
+  }, [signalStocks, closeArchive, closeRange, closeGroup, marketCapMode]);
   const enrichedStocks = useMemo(() => {
     const baseCodes = new Set(signalStocks.map(item => item.code));
     const watchedExtras = quotes.filter(item => watchlist.includes(item.code) && !baseCodes.has(item.code)).map(item => ({
@@ -268,7 +269,11 @@ export function App() {
     fetch(`/api/market/full-scan?id=${encodeURIComponent(fullScanKey)}`).then(response => response.json()).then(payload => {
       if (!active || !payload.data) return;
       const data = payload.data;
-      setFullScan({ status: data.status || "paused", offset: Number(data.offset || 0), total: Number(data.total || 0), failed: Number(data.failed || 0), matched: (data.items || []).length, updatedAt: data.updatedAt || null });
+      // A scan only runs in the browser that started it. A persisted "running"
+      // record is stale after a reload and must be resumable instead of locking
+      // the scan button forever.
+      const restoredStatus = data.status === "running" ? "paused" : (data.status || "paused");
+      setFullScan({ status: restoredStatus, offset: Number(data.offset || 0), total: Number(data.total || 0), failed: Number(data.failed || 0), matched: (data.items || []).length, updatedAt: data.updatedAt || null });
       if (Array.isArray(data.items) && data.items.length) setScanResults(data.items);
     }).catch(() => {});
     return () => { active = false; };
@@ -357,14 +362,14 @@ export function App() {
         ratio: Number(item.volumeRatio || 0).toFixed(2), price: Number(item.price || 0).toFixed(2),
         ma5: item.ma5, ma10: item.ma10, ma20: item.ma20, ma60: item.ma60, dif: item.dif, dea: item.dea, marketCap: Number(item.marketCap || 0),
         bullishMa: Boolean(item.bullishMa), macdGoldenCross: Boolean(item.macdGoldenCross), recentMacdCross: Boolean(item.recentMacdCross), volumeExpanded: Boolean(item.volumeExpanded), missingReasons: item.missingReasons || [],
-        industry: item.matched ? (payload.signalState === "confirmed" ? "严格收盘确认" : "盘中策略命中") : item.nearMatch ? "接近满足（观察）" : "真实行情高分观察候选", signalState: item.nearMatch ? (item.signalState || "near-confirmed") : item.matched ? (item.signalState || payload.signalState || "intraday") : "watch", preliminary: !item.matched && !item.nearMatch,
+        industry: item.matched ? (payload.signalState === "confirmed" ? "符合全部要求" : "盘中策略命中") : item.nearMatch ? "接近满足（观察）" : (payload.signalState === "confirmed" ? "收盘已检查" : "真实行情高分观察候选"), signalState: item.nearMatch ? (item.signalState || "near-confirmed") : item.matched ? (item.signalState || payload.signalState || "intraday") : (payload.signalState === "confirmed" ? "checked-confirmed" : "watch"), preliminary: !item.matched && !item.nearMatch,
       }));
       setScanResults(current => options.append ? [...new Map([...(current || []), ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score)) : nextResults);
       if (nextResults.length) setSelectedCode(nextResults[0].code);
-      setScanSummary({ state: "done", attempted: payload.attempted, scanned: payload.scanned, failed: payload.failed, completeness: payload.completeness, sourceLabel: payload.sourceLabel, quoteCoverage: payload.quoteCoverage, updatedAt: payload.updatedAt, matched: payload.matched, nearMatched: payload.nearMatched, durationMs: payload.durationMs, fallback: payload.fallback, cacheHits: payload.cacheHits || 0, fetched: payload.fetched || 0, nextOffset: payload.nextOffset });
+      setScanSummary({ state: "done", attempted: payload.attempted, scanned: payload.scanned, failed: payload.failed, failedDetails: payload.failedDetails || [], completeness: payload.completeness, sourceLabel: payload.sourceLabel, quoteCoverage: payload.quoteCoverage, updatedAt: payload.updatedAt, matched: payload.matched, nearMatched: payload.nearMatched, durationMs: payload.durationMs, fallback: payload.fallback, cacheHits: payload.cacheHits || 0, fetched: payload.fetched || 0, nextOffset: payload.nextOffset });
       if (payload.signalState === "confirmed" && !options.skipRecords) {
         const capturedAt = Date.now();
-        const batch = { id: `${payload.sessionDate || clock.date.slice(0, 10)}-${capturedAt}`, sessionDate: payload.sessionDate || clock.date.slice(0, 10), capturedAt, scanMode: payload.scanMode || "收盘后复盘", status: "success", attempted: payload.attempted || 0, scanned: payload.scanned || 0, failed: payload.failed || 0, completeness: payload.completeness || 0, sourceLabel: payload.sourceLabel || "免费行情", items: nextResults.filter(item => item.signalState === "confirmed" || item.signalState === "near-confirmed") };
+        const batch = { id: `${payload.sessionDate || clock.date.slice(0, 10)}-${capturedAt}`, sessionDate: payload.sessionDate || clock.date.slice(0, 10), capturedAt, scanMode: payload.scanMode || "收盘后复盘", status: "success", attempted: payload.attempted || 0, scanned: payload.scanned || 0, failed: payload.failed || 0, completeness: payload.completeness || 0, sourceLabel: payload.sourceLabel || "免费行情", items: nextResults };
         setCloseArchive(current => {
           const next = [batch, ...current.filter(item => item.id !== batch.id)].filter(item => Number(item.capturedAt) >= Date.now() - 45 * 24 * 3600e3).slice(0, 80);
           window.localStorage.setItem("resonance-close-archive", JSON.stringify(next));
@@ -418,17 +423,26 @@ export function App() {
       .sort((a, b) => String(a.code).localeCompare(String(b.code))).map(row => row.code);
     const sameTotal = fullScan.total === eligibleCodes.length;
     let offset = sameTotal && fullScan.status !== "done" ? Math.min(fullScan.offset, eligibleCodes.length) : 0;
-    let failed = sameTotal ? fullScan.failed : 0;
-    let accumulated = sameTotal && Array.isArray(scanResults) ? scanResults.filter(item => item.signalState === "confirmed" || item.signalState === "near-confirmed" || item.signalState === "intraday" || item.signalState === "near-intraday") : [];
+    const canResume = sameTotal && fullScan.status !== "done";
+    let failed = canResume ? fullScan.failed : 0;
+    let accumulated = canResume && Array.isArray(scanResults) ? scanResults.filter(item => item.signalState === "confirmed" || item.signalState === "near-confirmed" || item.signalState === "intraday" || item.signalState === "near-intraday") : [];
     setScanScope("full");
     setFullScan({ status: "running", offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() });
     while (offset < eligibleCodes.length && !fullScanStop.current) {
-      const codes = eligibleCodes.slice(offset, offset + 40);
-      try {
-        const { payload, nextResults } = await scan({ scope: String(codes.length), codes, append: true, matchesOnly: true, skipRecords: true });
-        accumulated = [...new Map([...accumulated, ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score));
-        failed += Number(payload.failed || 0);
-      } catch { failed += codes.length; }
+      const codes = eligibleCodes.slice(offset, offset + 10);
+      let batchResult = null; let batchError = "";
+      for (let attempt = 0; attempt < 2 && !batchResult; attempt++) {
+        try { batchResult = await scan({ scope: String(codes.length), codes, append: true, matchesOnly: true, skipRecords: true }); }
+        catch (error) { batchError = error?.message || "批次请求失败"; if (attempt === 0) await new Promise(resolve => window.setTimeout(resolve, 1800)); }
+      }
+      if (!batchResult) {
+        fullScanStop.current = true;
+        setFullScan(current => ({ ...current, status: "paused", batchError, updatedAt: Date.now() }));
+        break;
+      }
+      const { payload, nextResults } = batchResult;
+      accumulated = [...new Map([...accumulated, ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score));
+      failed += Number(payload.failed || 0);
       offset += codes.length;
       const status = offset >= eligibleCodes.length ? "done" : "running";
       const progress = { status, offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() };
@@ -522,21 +536,22 @@ export function App() {
           <div className="list-tabs"><button className={listMode === "signals" ? "active" : ""} onClick={() => setListMode("signals")}>盘中候选</button><button className={listMode === "confirmed" ? "active" : ""} onClick={() => setListMode("confirmed")}>收盘确认 <span>{confirmedStocks.length}</span></button><button className={listMode === "watchlist" ? "active" : ""} onClick={() => setListMode("watchlist")}>我的自选 <span>{watchlist.length}</span></button></div>
           <div className={`scan-strip ${scanSummary.state}`}>
             {fullScan.status === "running" && `全市场扫描：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}（${fullScan.total ? Math.round(fullScan.offset / fullScan.total * 100) : 0}%）· 已发现 ${fullScan.matched} 只 · 失败 ${fullScan.failed} 只`}
-            {fullScan.status === "paused" && `全市场扫描已暂停：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}，刷新或点击继续可续跑`}
+            {fullScan.status === "paused" && `全市场扫描已暂停：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}${fullScan.batchError ? ` · 当前批次失败：${fullScan.batchError}` : "，点击继续可续跑"}`}
             {fullScan.status === "done" && `全市场扫描完成：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()} · 全部信号 ${fullScan.matched} 只 · 失败 ${fullScan.failed} 只`}
             {fullScan.status === "idle" && scanSummary.state === "idle" && "刷新后自动开始全市场扫描，也可手动运行"}
             {fullScan.status === "idle" && scanSummary.state === "running" && "正在拉取历史日线并计算指标…"}
             {fullScan.status === "idle" && scanSummary.state === "done" && `${clock.trading ? "盘中扫描" : "收盘后复盘"}成功：分析 ${scanSummary.scanned}/${scanSummary.attempted || scanSummary.scanned}，严格 ${scanSummary.matched}，接近 ${scanSummary.nearMatched || 0} · 完整度 ${scanSummary.completeness || 0}%`}
             {fullScan.status === "idle" && scanSummary.state === "error" && `扫描失败（不是0只命中）：${scanSummary.message}，稍后会自动重试`}
           </div>
+          {fullScan.status === "idle" && scanSummary.state === "done" && scanSummary.failed > 0 && <div className="scan-fail-note">失败 {scanSummary.failed} 只不会计入“0只命中”{scanSummary.failedDetails?.length ? ` · 示例：${scanSummary.failedDetails.slice(0, 2).map(item => `${item.code} ${item.reason}`).join("；")}` : ""}</div>}
           <div className="scope-row" aria-label="扫描范围">
             {[{ value: "60", label: "快速60" }, { value: "200", label: "扩展200" }, { value: "full", label: "全部A股" }].map(option => <button key={option.value} className={scanScope === option.value ? "active" : ""} onClick={() => { setScanScope(option.value); if (option.value === "full" && fullScan.status !== "running") runFullScan().catch(() => {}); }}>{option.label}</button>)}
             {fullScan.status === "running" && <button className="stop-scan" onClick={stopFullScan}>暂停</button>}
             <span>已缓存 {cacheStatus.cachedSymbols} 只</span>
           </div>
-          {listMode === "signals" && <div className="cap-filter" aria-label="公司市值筛选"><span>公司市值</span>{[{value:"all",label:"全部"},{value:"above300",label:"300亿以上"},{value:"below300",label:"300亿以内"}].map(option => <button key={option.value} className={marketCapMode === option.value ? "active" : ""} onClick={() => { setMarketCapMode(option.value); setScanResults(null); }}>{option.label}</button>)}</div>}
+          {(listMode === "signals" || listMode === "confirmed") && <div className="cap-filter" aria-label="公司市值筛选"><span>公司市值</span>{[{value:"all",label:"全部市值"},{value:"above300",label:"300亿以上"},{value:"below300",label:"300亿以内"}].map(option => <button key={option.value} className={marketCapMode === option.value ? "active" : ""} onClick={() => { setMarketCapMode(option.value); if (listMode === "signals") setScanResults(null); }}>{option.label}</button>)}</div>}
           {listMode === "confirmed" && <div className="close-range" aria-label="收盘数据时间范围">{[{value:"2h",label:"最近2小时"},{value:"4h",label:"最近4小时"},{value:"day",label:"最近交易日"},{value:"week",label:"近5交易日"}].map(option => <button key={option.value} className={closeRange === option.value ? "active" : ""} onClick={() => setCloseRange(option.value)}>{option.label}</button>)}</div>}
-          {listMode === "confirmed" && <div className="close-groups" aria-label="收盘信号分组"><button className={closeGroup === "strict" ? "active" : ""} onClick={() => setCloseGroup("strict")}>严格命中</button><button className={closeGroup === "near" ? "active" : ""} onClick={() => setCloseGroup("near")}>接近满足</button></div>}
+          {listMode === "confirmed" && <div className="close-groups" aria-label="收盘信号分组"><button className={closeGroup === "all" ? "active" : ""} onClick={() => setCloseGroup("all")}>全部收盘信息</button><button className={closeGroup === "strict" ? "active" : ""} onClick={() => setCloseGroup("strict")}>符合要求</button><button className={closeGroup === "near" ? "active" : ""} onClick={() => setCloseGroup("near")}>接近满足</button></div>}
           <div className="watch-head"><span>排名　股票 / 代码</span><span>共振分　涨幅　量比</span></div>
           <div className="stock-list">
             {pagedVisible.map((item) => {
@@ -549,7 +564,7 @@ export function App() {
             {visible.length > visibleLimit && <button className="load-more" onClick={() => setVisibleLimit(limit => Math.min(limit + 12, visible.length))}>显示更多 <span>还有 {visible.length - visibleLimit} 只</span></button>}
             {visible.length === 0 && <div className="empty-watchlist"><Star size={28}/><strong>{query ? "没有匹配的股票" : (listMode === "confirmed" ? (scanSummary.state === "error" ? "收盘扫描失败" : "本范围内严格命中0只") : listMode === "signals" ? "本次扫描没有命中" : "还没有自选股")}</strong><span>{query ? "请尝试其他代码或名称" : (listMode === "confirmed" ? (scanSummary.state === "error" ? "这不是0只满足；免费行情恢复后可重新扫描" : "可切换“接近满足”或近5交易日查看，结果已保存") : listMode === "signals" ? "可以调整量比阈值或扩大扫描范围" : "从候选股详情中点击“加入自选”")}</span>{listMode === "watchlist" && <button onClick={() => setListMode("signals")}>返回共振候选</button>}</div>}
           </div>
-          <div className="watch-note"><p>{listMode === "confirmed" ? (closeGroup === "strict" ? "严格命中：三项条件全部满足" : "接近满足：多头趋势、近3日零轴金叉、量比≥1.2") : "说明：按共振分从高到低排序"}</p><strong>共 {listMode === "signals" ? signalStocks.length : visible.length} 只</strong></div>
+          <div className="watch-note"><p>{listMode === "confirmed" ? (closeGroup === "all" ? "显示本次收盘已成功分析的全部股票及条件状态" : closeGroup === "strict" ? "符合要求：均线多头 + MACD零轴上方当天金叉 + 成交量放大" : "接近满足：多头趋势、近3日零轴金叉、量比≥1.2") : "说明：按共振分从高到低排序"}</p><strong>共 {listMode === "signals" ? signalStocks.length : visible.length} 只</strong></div>
         </aside>
 
         <section className="analysis">
