@@ -140,6 +140,7 @@ export function App() {
   const [dataProvider, setDataProvider] = useState("auto");
   const [visibleLimit, setVisibleLimit] = useState(12);
   const [watchAnalysis, setWatchAnalysis] = useState({});
+  const [confirmedResults, setConfirmedResults] = useState([]);
   const [refreshStatus, setRefreshStatus] = useState({
     signals: { state: "idle", updatedAt: null, progress: 0 },
     confirmed: { state: "idle", updatedAt: null, progress: 0 },
@@ -178,12 +179,12 @@ export function App() {
     const cutoff = Date.now() - ({ "2h": 2 * 3600e3, "4h": 4 * 3600e3 }[closeRange] || 0);
     const includeGroup = item => closeGroup === "all" ? ["confirmed", "near-confirmed", "checked-confirmed"].includes(item.signalState) : closeGroup === "strict" ? item.signalState === "confirmed" : item.signalState === "near-confirmed";
     const includeCap = item => marketCapMode === "all" || (Number(item.marketCap || 0) > 0 && (marketCapMode === "above300" ? Number(item.marketCap) >= 30000000000 : Number(item.marketCap) < 30000000000));
-    const current = signalStocks.filter(item => includeGroup(item) && includeCap(item)).map(item => ({ ...item, capturedAt: Date.now() }));
+    const current = confirmedResults.filter(item => includeGroup(item) && includeCap(item)).map(item => ({ ...item, capturedAt: Date.now() }));
     const archived = closeArchive.filter(batch => closeRange === "2h" || closeRange === "4h" ? Number(batch.capturedAt) >= cutoff : allowedDates.includes(batch.sessionDate)).flatMap(batch => (batch.items || []).filter(item => includeGroup(item) && includeCap(item)).map(item => ({ ...item, capturedAt: batch.capturedAt, sessionDate: batch.sessionDate })));
     const latest = new Map();
     [...current, ...archived].sort((a, b) => Number(b.capturedAt) - Number(a.capturedAt)).forEach(item => { if (!latest.has(item.code)) latest.set(item.code, item); });
     return [...latest.values()].sort((a, b) => Number(b.score) - Number(a.score));
-  }, [signalStocks, closeArchive, closeRange, closeGroup, marketCapMode]);
+  }, [confirmedResults, closeArchive, closeRange, closeGroup, marketCapMode]);
   const enrichedStocks = useMemo(() => {
     const baseCodes = new Set(signalStocks.map(item => item.code));
     const watchedExtras = quotes.filter(item => watchlist.includes(item.code) && !baseCodes.has(item.code)).map(item => ({
@@ -367,8 +368,8 @@ export function App() {
     const effectiveScope = typeof scopeOverride === "string" ? scopeOverride : (options.scope || scanScope);
     const refreshTarget = options.target || (clock.afterClose || listMode === "confirmed" ? "confirmed" : "signals");
     setScanning(true);
-    updateRefreshStatus(refreshTarget, { state: "running", message: refreshTarget === "confirmed" ? "正在计算收盘确认" : "正在扫描盘中候选", progress: options.fullProgress ?? null });
-    setScanSummary(summary => ({ ...summary, state: "running" }));
+    updateRefreshStatus(refreshTarget, { state: "running", message: refreshTarget === "confirmed" ? "正在计算收盘确认" : refreshTarget === "watchlist" ? "正在更新我的自选" : "正在扫描盘中候选", progress: options.fullProgress ?? null });
+    if (refreshTarget !== "watchlist") setScanSummary(summary => ({ ...summary, state: "running" }));
     try {
       const params = new URLSearchParams({
         limit: effectiveScope, ma: strategy.ma.join(","), macd: strategy.macd.join(","),
@@ -390,11 +391,23 @@ export function App() {
         bullishMa: Boolean(item.bullishMa), macdGoldenCross: Boolean(item.macdGoldenCross), recentMacdCross: Boolean(item.recentMacdCross), volumeExpanded: Boolean(item.volumeExpanded), missingReasons: item.missingReasons || [],
         industry: item.matched ? (payload.signalState === "confirmed" ? "符合全部要求" : "盘中策略命中") : item.nearMatch ? "接近满足（观察）" : (payload.signalState === "confirmed" ? "收盘已检查" : "真实行情高分观察候选"), signalState: item.nearMatch ? (item.signalState || "near-confirmed") : item.matched ? (item.signalState || payload.signalState || "intraday") : (payload.signalState === "confirmed" ? "checked-confirmed" : "watch"), preliminary: !item.matched && !item.nearMatch,
       }));
-      setScanResults(current => options.append ? [...new Map([...(current || []), ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score)) : nextResults);
-      if (nextResults.length) setSelectedCode(nextResults[0].code);
+      if (refreshTarget === "watchlist") {
+        setWatchAnalysis(current => {
+          const next = { ...current };
+          nextResults.forEach(item => { next[item.code] = item; });
+          return next;
+        });
+      } else if (refreshTarget === "confirmed") {
+        setConfirmedResults(current => options.append ? [...new Map([...(current || []), ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score)) : nextResults);
+      } else {
+        setScanResults(current => options.append ? [...new Map([...(current || []), ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score)) : nextResults);
+      }
+      if (nextResults.length && refreshTarget !== "watchlist") setSelectedCode(nextResults[0].code);
       const completedSummary = { state: "done", attempted: payload.attempted, scanned: payload.scanned, failed: payload.failed, failedDetails: payload.failedDetails || [], completeness: payload.completeness, sourceLabel: payload.sourceLabel, quoteCoverage: payload.quoteCoverage, updatedAt: payload.updatedAt || Date.now(), matched: payload.matched, nearMatched: payload.nearMatched, durationMs: payload.durationMs, fallback: payload.fallback, cacheHits: payload.cacheHits || 0, fetched: payload.fetched || 0, nextOffset: payload.nextOffset };
-      setScanSummary(completedSummary);
-      window.localStorage.setItem("resonance-latest-scan-quality", JSON.stringify(completedSummary));
+      if (refreshTarget !== "watchlist") {
+        setScanSummary(completedSummary);
+        window.localStorage.setItem("resonance-latest-scan-quality", JSON.stringify(completedSummary));
+      }
       if (payload.signalState === "confirmed" && !options.skipRecords) {
         const capturedAt = Date.now();
         const batch = { id: `${payload.sessionDate || clock.date.slice(0, 10)}-${capturedAt}`, sessionDate: payload.sessionDate || clock.date.slice(0, 10), capturedAt, scanMode: payload.scanMode || "收盘后复盘", status: "success", attempted: payload.attempted || 0, scanned: payload.scanned || 0, failed: payload.failed || 0, completeness: payload.completeness || 0, sourceLabel: payload.sourceLabel || "免费行情", items: nextResults };
@@ -435,7 +448,7 @@ export function App() {
       if (!options.fullBatch) updateRefreshStatus(refreshTarget, { state: "done", updatedAt: Date.now(), message: `完成：扫描 ${payload.scanned || 0} 只，命中 ${payload.matched || 0} 只`, progress: 100 });
       return { payload, nextResults };
     } catch (error) {
-      setScanSummary({ state: "error", scanned: 0, matched: null, durationMs: 0, message: error.message });
+      if (refreshTarget !== "watchlist") setScanSummary({ state: "error", scanned: 0, matched: null, durationMs: 0, message: error.message });
       updateRefreshStatus(refreshTarget, { state: "error", message: error?.message || "刷新失败" });
       throw error;
     } finally {
@@ -443,7 +456,22 @@ export function App() {
     }
   }
 
-  async function runFullScan() {
+  async function refreshSection(target = listMode) {
+    if (target === "watchlist") {
+      if (!watchlist.length) {
+        updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), progress: 100, message: "自选列表为空" });
+        return;
+      }
+      return scan({ target: "watchlist", scope: String(Math.min(watchlist.length, 100)), codes: watchlist.slice(0, 100), matchesOnly: false, skipRecords: true });
+    }
+    if (scanScope === "full") {
+      setListMode(target);
+      return runFullScan(target);
+    }
+    return scan({ target });
+  }
+
+  async function runFullScan(targetOverride) {
     if (!quotes.length || fullScan.status === "running") return;
     fullScanStop.current = false;
     const eligibleCodes = quotes.filter(row => Number(row.price) > 0 && Number(row.volume) > 0)
@@ -460,8 +488,8 @@ export function App() {
     setQuery("");
     setVisibleLimit(12);
     if (!canResume) setScanResults([]);
-    setListMode(clock.afterClose ? "confirmed" : "signals");
-    const fullTarget = clock.afterClose ? "confirmed" : "signals";
+    const fullTarget = targetOverride === "confirmed" || targetOverride === "signals" ? targetOverride : (clock.afterClose ? "confirmed" : "signals");
+    setListMode(fullTarget);
     updateRefreshStatus(fullTarget, { state: "running", progress: eligibleCodes.length ? Math.round(offset / eligibleCodes.length * 100) : 0, message: `已处理 ${offset} / ${eligibleCodes.length}` });
     setFullScan({ status: "running", offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() });
     while (offset < eligibleCodes.length && !fullScanStop.current) {
@@ -564,12 +592,12 @@ export function App() {
         </div>
         <label className="auto-scan">自动<select aria-label="自动扫描周期" value={autoScanMinutes} onChange={event => updateAutoScan(event.target.value)}><option value="0">关闭</option><option value="5">5分钟</option><option value="15">15分钟</option></select></label>
         <div className="mode-switch" aria-label="显示模式"><button className={viewMode === "simple" ? "active" : ""} onClick={() => setViewMode("simple")}>简洁</button><button className={viewMode === "pro" ? "active" : ""} onClick={() => setViewMode("pro")}>专业</button></div>
-        <button className="primary refresh-primary" onClick={() => (scanScope === "full" ? runFullScan() : scan({ target: listMode === "watchlist" ? "signals" : listMode })).catch(() => {})}><ArrowClockwise className={scanning || fullScan.status === "running" ? "spin" : ""} size={18}/><span>{fullScan.status === "running" ? "全市场扫描中" : scanning ? `正在刷新${listMode === "confirmed" ? "收盘确认" : "盘中候选"}` : `刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "盘中与自选" : "盘中候选"}`}</span></button>
+        <button className="primary refresh-primary" onClick={() => refreshSection(listMode).catch(() => {})}><ArrowClockwise className={scanning || fullScan.status === "running" ? "spin" : ""} size={18}/><span>{fullScan.status === "running" ? "全市场扫描中" : scanning ? `正在刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}` : `刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}`}</span></button>
       </header>
 
       <section className={`workspace ${viewMode === "simple" ? "simple" : "pro"}`}>
         <aside className="watchlist">
-          <div className="panel-title"><strong>{listMode === "signals" ? "共振候选" : listMode === "confirmed" ? "收盘确认" : "我的自选"}</strong><span>{listMode === "signals" ? signalStocks.length : listMode === "confirmed" ? confirmedStocks.length : watchlist.length}</span><button aria-label={`刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}`} onClick={() => scan({ target: listMode === "watchlist" ? "signals" : listMode }).catch(() => {})}><ArrowClockwise className={(listMode === "watchlist" ? refreshStatus.watchlist.state === "running" : refreshStatus[listMode].state === "running") ? "spin" : ""} size={17}/></button></div>
+          <div className="panel-title"><strong>{listMode === "signals" ? "共振候选" : listMode === "confirmed" ? "收盘确认" : "我的自选"}</strong><span>{listMode === "signals" ? signalStocks.length : listMode === "confirmed" ? confirmedStocks.length : watchlist.length}</span><button aria-label={`刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}`} onClick={() => refreshSection(listMode).catch(() => {})}><ArrowClockwise className={(listMode === "watchlist" ? refreshStatus.watchlist.state === "running" : refreshStatus[listMode].state === "running") ? "spin" : ""} size={17}/></button></div>
           <div className="list-tabs"><button className={listMode === "signals" ? "active" : ""} onClick={() => setListMode("signals")}>盘中候选{refreshStatus.signals.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "confirmed" ? "active" : ""} onClick={() => setListMode("confirmed")}>收盘确认 <span>{confirmedStocks.length}</span>{refreshStatus.confirmed.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "watchlist" ? "active" : ""} onClick={() => setListMode("watchlist")}>我的自选 <span>{watchlist.length}</span>{refreshStatus.watchlist.state === "running" && <i className="refresh-dot" />}</button></div>
           <div className="refresh-board" aria-live="polite">
             {[["signals", "盘中候选"], ["confirmed", "收盘确认"], ["watchlist", "我的自选"]].map(([key, label]) => {
