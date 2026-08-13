@@ -132,6 +132,16 @@ export function App() {
   const [dataProvider, setDataProvider] = useState("auto");
   const [visibleLimit, setVisibleLimit] = useState(12);
   const [watchAnalysis, setWatchAnalysis] = useState({});
+  const [refreshStatus, setRefreshStatus] = useState({
+    signals: { state: "idle", updatedAt: null },
+    confirmed: { state: "idle", updatedAt: null },
+    watchlist: { state: "idle", updatedAt: null },
+  });
+  const updateRefreshStatus = (target, patch) => setRefreshStatus(current => ({
+    ...current, [target]: { ...current[target], ...patch },
+  }));
+  const refreshTime = value => value ? new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "尚未刷新";
+  const refreshLabel = target => refreshStatus[target].state === "running" ? "刷新中" : refreshStatus[target].state === "error" ? "刷新失败" : refreshTime(refreshStatus[target].updatedAt);
   const [closeArchive, setCloseArchive] = useState([]);
   const [closeRange, setCloseRange] = useState("day");
   const [marketCapMode, setMarketCapMode] = useState("all");
@@ -315,13 +325,19 @@ export function App() {
   }, [autoScanMinutes, scanScope, strategy]);
 
   useEffect(() => {
-    if (!watchlist.length) { setWatchAnalysis({}); return; }
+    if (!watchlist.length) {
+      setWatchAnalysis({});
+      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: "暂无自选" });
+      return;
+    }
     let active = true;
+    updateRefreshStatus("watchlist", { state: "running", message: `正在更新 ${watchlist.length} 只自选` });
     const params = new URLSearchParams({ codes: watchlist.join(","), limit: String(watchlist.length), ma: strategy.ma.join(","), macd: strategy.macd.join(","), volumeRatio: String(strategy.volumeRatio), maxRise: String(strategy.maxRise), minDays: String(strategy.minDays), excludeST: "false" });
     fetch(`/api/market/scan?${params}`).then(response => response.json()).then(payload => {
       if (!active || !Array.isArray(payload.leaders)) return;
       setWatchAnalysis(Object.fromEntries(payload.leaders.map(item => [item.code, item])));
-    }).catch(() => {});
+      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: `已更新 ${payload.leaders.length} 只` });
+    }).catch(error => active && updateRefreshStatus("watchlist", { state: "error", message: error?.message || "更新失败" }));
     return () => { active = false; };
   }, [watchlist, strategy]);
 
@@ -341,7 +357,9 @@ export function App() {
     if (scanning) throw new Error("扫描正在进行");
     const options = scopeOverride && typeof scopeOverride === "object" ? scopeOverride : {};
     const effectiveScope = typeof scopeOverride === "string" ? scopeOverride : (options.scope || scanScope);
+    const refreshTarget = options.target || (clock.afterClose || listMode === "confirmed" ? "confirmed" : "signals");
     setScanning(true);
+    updateRefreshStatus(refreshTarget, { state: "running", message: refreshTarget === "confirmed" ? "正在计算收盘确认" : "正在扫描盘中候选" });
     setScanSummary(summary => ({ ...summary, state: "running" }));
     try {
       const params = new URLSearchParams({
@@ -404,9 +422,11 @@ export function App() {
         return next;
       });
       fetch("/api/market/cache-status").then(response => response.json()).then(setCacheStatus).catch(() => {});
+      updateRefreshStatus(refreshTarget, { state: "done", updatedAt: Date.now(), message: `完成：扫描 ${payload.scanned || 0} 只，命中 ${payload.matched || 0} 只` });
       return { payload, nextResults };
     } catch (error) {
       setScanSummary({ state: "error", scanned: 0, matched: null, durationMs: 0, message: error.message });
+      updateRefreshStatus(refreshTarget, { state: "error", message: error?.message || "刷新失败" });
       throw error;
     } finally {
       setScanning(false);
@@ -527,13 +547,16 @@ export function App() {
         </div>
         <label className="auto-scan">自动<select aria-label="自动扫描周期" value={autoScanMinutes} onChange={event => updateAutoScan(event.target.value)}><option value="0">关闭</option><option value="5">5分钟</option><option value="15">15分钟</option></select></label>
         <div className="mode-switch" aria-label="显示模式"><button className={viewMode === "simple" ? "active" : ""} onClick={() => setViewMode("simple")}>简洁</button><button className={viewMode === "pro" ? "active" : ""} onClick={() => setViewMode("pro")}>专业</button></div>
-        <button className="primary" onClick={() => (scanScope === "full" ? runFullScan() : scan()).catch(() => {})}><ArrowClockwise className={scanning || fullScan.status === "running" ? "spin" : ""} size={18}/>{fullScan.status === "running" ? "全市场扫描中" : scanning ? "扫描中" : "重新扫描"}</button>
+        <button className="primary refresh-primary" onClick={() => (scanScope === "full" ? runFullScan() : scan({ target: listMode === "watchlist" ? "signals" : listMode })).catch(() => {})}><ArrowClockwise className={scanning || fullScan.status === "running" ? "spin" : ""} size={18}/><span>{fullScan.status === "running" ? "全市场扫描中" : scanning ? `正在刷新${listMode === "confirmed" ? "收盘确认" : "盘中候选"}` : `刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "盘中与自选" : "盘中候选"}`}</span></button>
       </header>
 
       <section className={`workspace ${viewMode === "simple" ? "simple" : "pro"}`}>
         <aside className="watchlist">
-          <div className="panel-title"><strong>{listMode === "signals" ? "共振候选" : listMode === "confirmed" ? "收盘确认" : "我的自选"}</strong><span>{listMode === "signals" ? signalStocks.length : listMode === "confirmed" ? confirmedStocks.length : watchlist.length}</span><button aria-label="刷新" onClick={() => scan().catch(() => {})}><ArrowClockwise size={17}/></button></div>
-          <div className="list-tabs"><button className={listMode === "signals" ? "active" : ""} onClick={() => setListMode("signals")}>盘中候选</button><button className={listMode === "confirmed" ? "active" : ""} onClick={() => setListMode("confirmed")}>收盘确认 <span>{confirmedStocks.length}</span></button><button className={listMode === "watchlist" ? "active" : ""} onClick={() => setListMode("watchlist")}>我的自选 <span>{watchlist.length}</span></button></div>
+          <div className="panel-title"><strong>{listMode === "signals" ? "共振候选" : listMode === "confirmed" ? "收盘确认" : "我的自选"}</strong><span>{listMode === "signals" ? signalStocks.length : listMode === "confirmed" ? confirmedStocks.length : watchlist.length}</span><button aria-label={`刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}`} onClick={() => scan({ target: listMode === "watchlist" ? "signals" : listMode }).catch(() => {})}><ArrowClockwise className={(listMode === "watchlist" ? refreshStatus.watchlist.state === "running" : refreshStatus[listMode].state === "running") ? "spin" : ""} size={17}/></button></div>
+          <div className="list-tabs"><button className={listMode === "signals" ? "active" : ""} onClick={() => setListMode("signals")}>盘中候选{refreshStatus.signals.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "confirmed" ? "active" : ""} onClick={() => setListMode("confirmed")}>收盘确认 <span>{confirmedStocks.length}</span>{refreshStatus.confirmed.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "watchlist" ? "active" : ""} onClick={() => setListMode("watchlist")}>我的自选 <span>{watchlist.length}</span>{refreshStatus.watchlist.state === "running" && <i className="refresh-dot" />}</button></div>
+          <div className="refresh-board" aria-live="polite">
+            {[["signals", "盘中候选"], ["confirmed", "收盘确认"], ["watchlist", "我的自选"]].map(([key, label]) => <div key={key} className={`refresh-item ${refreshStatus[key].state}`}><span className="refresh-state-icon">{refreshStatus[key].state === "running" ? <ArrowClockwise className="spin" size={14}/> : refreshStatus[key].state === "error" ? <Warning size={14}/> : refreshStatus[key].updatedAt ? <Check size={14}/> : "·"}</span><div><strong>{label}</strong><small>{refreshLabel(key)}</small></div></div>)}
+          </div>
           <div className={`scan-strip ${scanSummary.state}`}>
             {fullScan.status === "running" && `全市场扫描：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}（${fullScan.total ? Math.round(fullScan.offset / fullScan.total * 100) : 0}%）· 已发现 ${fullScan.matched} 只 · 失败 ${fullScan.failed} 只`}
             {fullScan.status === "paused" && `全市场扫描已暂停：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}${fullScan.batchError ? ` · 当前批次失败：${fullScan.batchError}` : "，点击继续可续跑"}`}
