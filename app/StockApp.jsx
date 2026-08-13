@@ -38,6 +38,14 @@ function loadScanHistory() {
   } catch { return []; }
 }
 
+function loadLatestScanQuality() {
+  if (typeof window === "undefined") return { state: "idle", scanned: 0, matched: null, durationMs: 0 };
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("resonance-latest-scan-quality"));
+    return saved?.state === "done" ? saved : { state: "idle", scanned: 0, matched: null, durationMs: 0 };
+  } catch { return { state: "idle", scanned: 0, matched: null, durationMs: 0 }; }
+}
+
 function loadSignalAlerts() {
   if (typeof window === "undefined") return [];
   try {
@@ -115,7 +123,7 @@ export function App() {
   const [query, setQuery] = useState("");
   const [quotes, setQuotes] = useState(stocks);
   const [feed, setFeed] = useState({ source: "连接中", fallback: false, updatedAt: null, count: 0 });
-  const [scanSummary, setScanSummary] = useState({ state: "idle", scanned: 0, matched: null, durationMs: 0 });
+  const [scanSummary, setScanSummary] = useState(loadLatestScanQuality);
   const [scanResults, setScanResults] = useState(null);
   const [scanScope, setScanScope] = useState("60");
   const [cacheStatus, setCacheStatus] = useState({ cachedSymbols: 0, ttlHours: 6 });
@@ -384,7 +392,9 @@ export function App() {
       }));
       setScanResults(current => options.append ? [...new Map([...(current || []), ...nextResults].map(item => [item.code, item])).values()].sort((a, b) => Number(b.score) - Number(a.score)) : nextResults);
       if (nextResults.length) setSelectedCode(nextResults[0].code);
-      setScanSummary({ state: "done", attempted: payload.attempted, scanned: payload.scanned, failed: payload.failed, failedDetails: payload.failedDetails || [], completeness: payload.completeness, sourceLabel: payload.sourceLabel, quoteCoverage: payload.quoteCoverage, updatedAt: payload.updatedAt, matched: payload.matched, nearMatched: payload.nearMatched, durationMs: payload.durationMs, fallback: payload.fallback, cacheHits: payload.cacheHits || 0, fetched: payload.fetched || 0, nextOffset: payload.nextOffset });
+      const completedSummary = { state: "done", attempted: payload.attempted, scanned: payload.scanned, failed: payload.failed, failedDetails: payload.failedDetails || [], completeness: payload.completeness, sourceLabel: payload.sourceLabel, quoteCoverage: payload.quoteCoverage, updatedAt: payload.updatedAt || Date.now(), matched: payload.matched, nearMatched: payload.nearMatched, durationMs: payload.durationMs, fallback: payload.fallback, cacheHits: payload.cacheHits || 0, fetched: payload.fetched || 0, nextOffset: payload.nextOffset };
+      setScanSummary(completedSummary);
+      window.localStorage.setItem("resonance-latest-scan-quality", JSON.stringify(completedSummary));
       if (payload.signalState === "confirmed" && !options.skipRecords) {
         const capturedAt = Date.now();
         const batch = { id: `${payload.sessionDate || clock.date.slice(0, 10)}-${capturedAt}`, sessionDate: payload.sessionDate || clock.date.slice(0, 10), capturedAt, scanMode: payload.scanMode || "收盘后复盘", status: "success", attempted: payload.attempted || 0, scanned: payload.scanned || 0, failed: payload.failed || 0, completeness: payload.completeness || 0, sourceLabel: payload.sourceLabel || "免费行情", items: nextResults };
@@ -447,6 +457,10 @@ export function App() {
     let failed = canResume ? fullScan.failed : 0;
     let accumulated = canResume && Array.isArray(scanResults) ? scanResults.filter(item => item.signalState === "confirmed" || item.signalState === "near-confirmed" || item.signalState === "intraday" || item.signalState === "near-intraday") : [];
     setScanScope("full");
+    setQuery("");
+    setVisibleLimit(12);
+    if (!canResume) setScanResults([]);
+    setListMode(clock.afterClose ? "confirmed" : "signals");
     setFullScan({ status: "running", offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() });
     while (offset < eligibleCodes.length && !fullScanStop.current) {
       const codes = eligibleCodes.slice(offset, offset + 10);
@@ -558,9 +572,9 @@ export function App() {
             {[["signals", "盘中候选"], ["confirmed", "收盘确认"], ["watchlist", "我的自选"]].map(([key, label]) => <div key={key} className={`refresh-item ${refreshStatus[key].state}`}><span className="refresh-state-icon">{refreshStatus[key].state === "running" ? <ArrowClockwise className="spin" size={14}/> : refreshStatus[key].state === "error" ? <Warning size={14}/> : refreshStatus[key].updatedAt ? <Check size={14}/> : "·"}</span><div><strong>{label}</strong><small>{refreshLabel(key)}</small></div></div>)}
           </div>
           <div className={`scan-strip ${scanSummary.state}`}>
-            {fullScan.status === "running" && `全市场扫描：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}（${fullScan.total ? Math.round(fullScan.offset / fullScan.total * 100) : 0}%）· 已发现 ${fullScan.matched} 只 · 失败 ${fullScan.failed} 只`}
+            {fullScan.status === "running" && `正在刷新${clock.afterClose ? "收盘确认" : "盘中候选"}：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}（${fullScan.total ? Math.round(fullScan.offset / fullScan.total * 100) : 0}%）· 当前列表 ${signalStocks.length} 只 · 数据失败 ${fullScan.failed} 只`}
             {fullScan.status === "paused" && `全市场扫描已暂停：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}${fullScan.batchError ? ` · 当前批次失败：${fullScan.batchError}` : "，点击继续可续跑"}`}
-            {fullScan.status === "done" && `全市场扫描完成：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()} · 全部信号 ${fullScan.matched} 只 · 失败 ${fullScan.failed} 只`}
+            {fullScan.status === "done" && `${clock.afterClose ? "收盘确认" : "盘中候选"}刷新完成：检查 ${fullScan.offset.toLocaleString()} 只 · 当前列表 ${signalStocks.length} 只 · 数据失败 ${fullScan.failed} 只`}
             {fullScan.status === "idle" && scanSummary.state === "idle" && "刷新后自动开始全市场扫描，也可手动运行"}
             {fullScan.status === "idle" && scanSummary.state === "running" && "正在拉取历史日线并计算指标…"}
             {fullScan.status === "idle" && scanSummary.state === "done" && `${clock.trading ? "盘中扫描" : "收盘后复盘"}成功：分析 ${scanSummary.scanned}/${scanSummary.attempted || scanSummary.scanned}，严格 ${scanSummary.matched}，接近 ${scanSummary.nearMatched || 0} · 完整度 ${scanSummary.completeness || 0}%`}
@@ -604,7 +618,7 @@ export function App() {
             <div className={`risk-card risk-${riskLevel}`}><span>风险等级</span><strong>{riskLevel}风险</strong><p>{riskFlags.length ? riskFlags.join("；") : "暂未发现明显追高或过热风险，但仍可能随行情变化"}</p></div>
             <div className="plain-checks"><h3>为什么进入名单</h3><div><b className={stock.bullishMa ? "ok" : "no"}>{stock.bullishMa ? "✓" : "·"}</b><span>均线多头<small>MA5 &gt; MA10 &gt; MA20 &gt; MA60</small></span></div><div><b className={stock.macdGoldenCross ? "ok" : stock.recentMacdCross ? "near" : "no"}>{stock.macdGoldenCross ? "✓" : stock.recentMacdCross ? "近3日" : "·"}</b><span>MACD零轴金叉<small>{stock.macdGoldenCross ? "当天确认" : stock.recentMacdCross ? "不是当天金叉" : "尚未确认"}</small></span></div><div><b className={stock.volumeExpanded ? "ok" : "no"}>{stock.volumeExpanded ? "✓" : "·"}</b><span>成交量放大<small>当前量比 {stock.ratio || "--"}，标准 ≥ {strategy.volumeRatio}</small></span></div></div>
             <div className="invalidation"><h3>什么情况下信号失效</h3><p>收盘跌破MA20，或MA5跌破MA10</p><p>MACD形成死叉并跌向零轴下方</p><p>量比快速跌破1.2，放量条件消失</p></div>
-            <div className="quality-card"><span>本次扫描可信度</span><strong>{scanSummary.state === "done" ? `${scanSummary.completeness || 0}%` : "尚未扫描"}</strong><p>{scanSummary.state === "done" ? `计划 ${scanSummary.attempted || 0}只 · 成功 ${scanSummary.scanned || 0}只 · 失败 ${scanSummary.failed || 0}只` : "点击重新扫描后显示完整度"}</p><p>{scanSummary.sourceLabel || feed.sourceLabel || "免费行情"} · 行情覆盖 {scanSummary.quoteCoverage || feed.count || 0}只</p></div>
+            <div className="quality-card"><span>最近一次成功扫描可信度</span><strong>{scanSummary.state === "done" ? `${scanSummary.completeness || 0}%` : scanning || fullScan.status === "running" ? "计算中" : "尚无成功扫描"}</strong><p>{scanSummary.state === "done" ? `计划 ${scanSummary.attempted || 0}只 · 成功 ${scanSummary.scanned || 0}只 · 数据失败 ${scanSummary.failed || 0}只` : scanning || fullScan.status === "running" ? "扫描完成后自动更新可信度" : "点击刷新后显示数据完整度"}</p><p>{scanSummary.state === "done" ? `更新于 ${refreshTime(scanSummary.updatedAt)} · ` : ""}{scanSummary.sourceLabel || feed.sourceLabel || "免费行情"} · 行情覆盖 {scanSummary.quoteCoverage || feed.count || 0}只</p></div>
             <div className="simple-warning"><Warning size={20}/><p>技术信号不代表一定上涨。避免追高、重仓单只股票或把观察信号当成买入指令。</p></div>
           </div>
           <div className="chart-toolbar">
