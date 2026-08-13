@@ -7,7 +7,7 @@
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS",
-    "run_worker_first": true
+    "run_worker_first": false
   },
   "vars": {
     "PYTHON_DATA_API": "https://stock-resonance-data.onrender.com"
