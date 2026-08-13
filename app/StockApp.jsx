@@ -155,6 +155,7 @@ export function App() {
   const [closeRange, setCloseRange] = useState("day");
   const [marketCapMode, setMarketCapMode] = useState("all");
   const [closeGroup, setCloseGroup] = useState("all");
+  const [listFiltersOpen, setListFiltersOpen] = useState(false);
   const [viewMode, setViewMode] = useState("simple");
   const initialAutoScan = useRef(false);
   const fullScanStop = useRef(false);
@@ -616,14 +617,21 @@ export function App() {
             {fullScan.status === "idle" && scanSummary.state === "error" && `扫描失败（不是0只命中）：${scanSummary.message}，稍后会自动重试`}
           </div>
           {fullScan.status === "idle" && scanSummary.state === "done" && scanSummary.failed > 0 && <div className="scan-fail-note">失败 {scanSummary.failed} 只不会计入“0只命中”{scanSummary.failedDetails?.length ? ` · 示例：${scanSummary.failedDetails.slice(0, 2).map(item => `${item.code} ${item.reason}`).join("；")}` : ""}</div>}
-          <div className="scope-row" aria-label="扫描范围">
-            {[{ value: "60", label: "快速60" }, { value: "200", label: "扩展200" }, { value: "full", label: "全部A股" }].map(option => <button key={option.value} className={scanScope === option.value ? "active" : ""} onClick={() => { setScanScope(option.value); if (option.value === "full" && fullScan.status !== "running") runFullScan().catch(() => {}); }}>{option.label}</button>)}
-            {fullScan.status === "running" && <button className="stop-scan" onClick={stopFullScan}>暂停</button>}
-            <span>已缓存 {cacheStatus.cachedSymbols} 只</span>
-          </div>
-          {(listMode === "signals" || listMode === "confirmed") && <div className="cap-filter" aria-label="公司市值筛选"><span>公司市值</span>{[{value:"all",label:"全部市值"},{value:"above300",label:"300亿以上"},{value:"below300",label:"300亿以内"}].map(option => <button key={option.value} className={marketCapMode === option.value ? "active" : ""} onClick={() => { setMarketCapMode(option.value); if (listMode === "signals") setScanResults(null); }}>{option.label}</button>)}</div>}
-          {listMode === "confirmed" && <div className="close-range" aria-label="收盘数据时间范围">{[{value:"2h",label:"最近2小时"},{value:"4h",label:"最近4小时"},{value:"day",label:"最近交易日"},{value:"week",label:"近5交易日"}].map(option => <button key={option.value} className={closeRange === option.value ? "active" : ""} onClick={() => setCloseRange(option.value)}>{option.label}</button>)}</div>}
-          {listMode === "confirmed" && <div className="close-groups" aria-label="收盘信号分组"><button className={closeGroup === "all" ? "active" : ""} onClick={() => setCloseGroup("all")}>全部收盘信息</button><button className={closeGroup === "strict" ? "active" : ""} onClick={() => setCloseGroup("strict")}>符合要求</button><button className={closeGroup === "near" ? "active" : ""} onClick={() => setCloseGroup("near")}>接近满足</button></div>}
+          <button className={`filter-disclosure ${listFiltersOpen ? "open" : ""}`} aria-expanded={listFiltersOpen} onClick={() => setListFiltersOpen(value => !value)}>
+            <span><strong>筛选条件</strong><small>{scanScope === "60" ? "快速60" : scanScope === "200" ? "扩展200" : "全部A股"} · {marketCapMode === "above300" ? "300亿以上" : marketCapMode === "below300" ? "300亿以内" : "全部市值"}{listMode === "confirmed" ? ` · ${closeRange === "2h" ? "最近2小时" : closeRange === "4h" ? "最近4小时" : closeRange === "week" ? "近5交易日" : "最近交易日"} · ${closeGroup === "strict" ? "符合要求" : closeGroup === "near" ? "接近满足" : "全部收盘信息"}` : ""}</small></span>
+            <CaretDown size={18}/>
+          </button>
+          {listFiltersOpen && <div className="filter-panel">
+            <div className="filter-group"><strong>扫描范围</strong><div className="scope-row" aria-label="扫描范围">
+              {[{ value: "60", label: "快速60" }, { value: "200", label: "扩展200" }, { value: "full", label: "全部A股" }].map(option => <button key={option.value} className={scanScope === option.value ? "active" : ""} onClick={() => { setScanScope(option.value); if (option.value === "full" && fullScan.status !== "running") runFullScan().catch(() => {}); }}>{option.label}</button>)}
+              {fullScan.status === "running" && <button className="stop-scan" onClick={stopFullScan}>暂停</button>}
+              <span>已缓存 {cacheStatus.cachedSymbols} 只</span>
+            </div></div>
+            {(listMode === "signals" || listMode === "confirmed") && <div className="filter-group"><strong>公司市值</strong><div className="cap-filter" aria-label="公司市值筛选">{[{value:"all",label:"全部市值"},{value:"above300",label:"300亿以上"},{value:"below300",label:"300亿以内"}].map(option => <button key={option.value} className={marketCapMode === option.value ? "active" : ""} onClick={() => { setMarketCapMode(option.value); if (listMode === "signals") setScanResults(null); }}>{option.label}</button>)}</div></div>}
+            {listMode === "confirmed" && <div className="filter-group"><strong>数据时间</strong><div className="close-range" aria-label="收盘数据时间范围">{[{value:"2h",label:"最近2小时"},{value:"4h",label:"最近4小时"},{value:"day",label:"最近交易日"},{value:"week",label:"近5交易日"}].map(option => <button key={option.value} className={closeRange === option.value ? "active" : ""} onClick={() => setCloseRange(option.value)}>{option.label}</button>)}</div></div>}
+            {listMode === "confirmed" && <div className="filter-group"><strong>信号类型</strong><div className="close-groups" aria-label="收盘信号分组"><button className={closeGroup === "all" ? "active" : ""} onClick={() => setCloseGroup("all")}>全部收盘信息</button><button className={closeGroup === "strict" ? "active" : ""} onClick={() => setCloseGroup("strict")}>符合要求</button><button className={closeGroup === "near" ? "active" : ""} onClick={() => setCloseGroup("near")}>接近满足</button></div></div>}
+            <button className="filter-collapse" onClick={() => setListFiltersOpen(false)}>完成并收起</button>
+          </div>}
           <div className="watch-head"><span>排名　股票 / 代码</span><span>共振分　涨幅　量比</span></div>
           <div className="stock-list">
             {pagedVisible.map((item) => {
