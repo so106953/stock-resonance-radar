@@ -141,9 +141,9 @@ export function App() {
   const [visibleLimit, setVisibleLimit] = useState(12);
   const [watchAnalysis, setWatchAnalysis] = useState({});
   const [refreshStatus, setRefreshStatus] = useState({
-    signals: { state: "idle", updatedAt: null },
-    confirmed: { state: "idle", updatedAt: null },
-    watchlist: { state: "idle", updatedAt: null },
+    signals: { state: "idle", updatedAt: null, progress: 0 },
+    confirmed: { state: "idle", updatedAt: null, progress: 0 },
+    watchlist: { state: "idle", updatedAt: null, progress: 0 },
   });
   const updateRefreshStatus = (target, patch) => setRefreshStatus(current => ({
     ...current, [target]: { ...current[target], ...patch },
@@ -335,16 +335,16 @@ export function App() {
   useEffect(() => {
     if (!watchlist.length) {
       setWatchAnalysis({});
-      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: "暂无自选" });
+      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: "暂无自选", progress: 100 });
       return;
     }
     let active = true;
-    updateRefreshStatus("watchlist", { state: "running", message: `正在更新 ${watchlist.length} 只自选` });
+    updateRefreshStatus("watchlist", { state: "running", message: `正在更新 ${watchlist.length} 只自选`, progress: null });
     const params = new URLSearchParams({ codes: watchlist.join(","), limit: String(watchlist.length), ma: strategy.ma.join(","), macd: strategy.macd.join(","), volumeRatio: String(strategy.volumeRatio), maxRise: String(strategy.maxRise), minDays: String(strategy.minDays), excludeST: "false" });
     fetch(`/api/market/scan?${params}`).then(response => response.json()).then(payload => {
       if (!active || !Array.isArray(payload.leaders)) return;
       setWatchAnalysis(Object.fromEntries(payload.leaders.map(item => [item.code, item])));
-      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: `已更新 ${payload.leaders.length} 只` });
+      updateRefreshStatus("watchlist", { state: "done", updatedAt: Date.now(), message: `已更新 ${payload.leaders.length} 只`, progress: 100 });
     }).catch(error => active && updateRefreshStatus("watchlist", { state: "error", message: error?.message || "更新失败" }));
     return () => { active = false; };
   }, [watchlist, strategy]);
@@ -367,7 +367,7 @@ export function App() {
     const effectiveScope = typeof scopeOverride === "string" ? scopeOverride : (options.scope || scanScope);
     const refreshTarget = options.target || (clock.afterClose || listMode === "confirmed" ? "confirmed" : "signals");
     setScanning(true);
-    updateRefreshStatus(refreshTarget, { state: "running", message: refreshTarget === "confirmed" ? "正在计算收盘确认" : "正在扫描盘中候选" });
+    updateRefreshStatus(refreshTarget, { state: "running", message: refreshTarget === "confirmed" ? "正在计算收盘确认" : "正在扫描盘中候选", progress: options.fullProgress ?? null });
     setScanSummary(summary => ({ ...summary, state: "running" }));
     try {
       const params = new URLSearchParams({
@@ -432,7 +432,7 @@ export function App() {
         return next;
       });
       fetch("/api/market/cache-status").then(response => response.json()).then(setCacheStatus).catch(() => {});
-      updateRefreshStatus(refreshTarget, { state: "done", updatedAt: Date.now(), message: `完成：扫描 ${payload.scanned || 0} 只，命中 ${payload.matched || 0} 只` });
+      if (!options.fullBatch) updateRefreshStatus(refreshTarget, { state: "done", updatedAt: Date.now(), message: `完成：扫描 ${payload.scanned || 0} 只，命中 ${payload.matched || 0} 只`, progress: 100 });
       return { payload, nextResults };
     } catch (error) {
       setScanSummary({ state: "error", scanned: 0, matched: null, durationMs: 0, message: error.message });
@@ -461,12 +461,14 @@ export function App() {
     setVisibleLimit(12);
     if (!canResume) setScanResults([]);
     setListMode(clock.afterClose ? "confirmed" : "signals");
+    const fullTarget = clock.afterClose ? "confirmed" : "signals";
+    updateRefreshStatus(fullTarget, { state: "running", progress: eligibleCodes.length ? Math.round(offset / eligibleCodes.length * 100) : 0, message: `已处理 ${offset} / ${eligibleCodes.length}` });
     setFullScan({ status: "running", offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() });
     while (offset < eligibleCodes.length && !fullScanStop.current) {
       const codes = eligibleCodes.slice(offset, offset + 10);
       let batchResult = null; let batchError = "";
       for (let attempt = 0; attempt < 2 && !batchResult; attempt++) {
-        try { batchResult = await scan({ scope: String(codes.length), codes, append: true, matchesOnly: true, skipRecords: true }); }
+        try { batchResult = await scan({ scope: String(codes.length), codes, append: true, matchesOnly: true, skipRecords: true, target: fullTarget, fullBatch: true, fullProgress: eligibleCodes.length ? Math.round(offset / eligibleCodes.length * 100) : 0 }); }
         catch (error) { batchError = error?.message || "批次请求失败"; if (attempt === 0) await new Promise(resolve => window.setTimeout(resolve, 1800)); }
       }
       if (!batchResult) {
@@ -481,6 +483,7 @@ export function App() {
       const status = offset >= eligibleCodes.length ? "done" : "running";
       const progress = { status, offset, total: eligibleCodes.length, failed, matched: accumulated.length, updatedAt: Date.now() };
       setFullScan(progress);
+      updateRefreshStatus(fullTarget, { state: status === "done" ? "done" : "running", progress: eligibleCodes.length ? Math.round(offset / eligibleCodes.length * 100) : 100, updatedAt: status === "done" ? Date.now() : null, message: status === "done" ? `完成：当前列表 ${accumulated.length} 只` : `已处理 ${offset} / ${eligibleCodes.length}` });
       await fetch(`/api/market/full-scan?id=${encodeURIComponent(fullScanKey)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...progress, sessionDate: chinaClock().date.slice(0, 10), items: accumulated }) }).catch(() => {});
       if (status === "done") break;
     }
@@ -569,7 +572,11 @@ export function App() {
           <div className="panel-title"><strong>{listMode === "signals" ? "共振候选" : listMode === "confirmed" ? "收盘确认" : "我的自选"}</strong><span>{listMode === "signals" ? signalStocks.length : listMode === "confirmed" ? confirmedStocks.length : watchlist.length}</span><button aria-label={`刷新${listMode === "confirmed" ? "收盘确认" : listMode === "watchlist" ? "我的自选" : "盘中候选"}`} onClick={() => scan({ target: listMode === "watchlist" ? "signals" : listMode }).catch(() => {})}><ArrowClockwise className={(listMode === "watchlist" ? refreshStatus.watchlist.state === "running" : refreshStatus[listMode].state === "running") ? "spin" : ""} size={17}/></button></div>
           <div className="list-tabs"><button className={listMode === "signals" ? "active" : ""} onClick={() => setListMode("signals")}>盘中候选{refreshStatus.signals.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "confirmed" ? "active" : ""} onClick={() => setListMode("confirmed")}>收盘确认 <span>{confirmedStocks.length}</span>{refreshStatus.confirmed.state === "running" && <i className="refresh-dot" />}</button><button className={listMode === "watchlist" ? "active" : ""} onClick={() => setListMode("watchlist")}>我的自选 <span>{watchlist.length}</span>{refreshStatus.watchlist.state === "running" && <i className="refresh-dot" />}</button></div>
           <div className="refresh-board" aria-live="polite">
-            {[["signals", "盘中候选"], ["confirmed", "收盘确认"], ["watchlist", "我的自选"]].map(([key, label]) => <div key={key} className={`refresh-item ${refreshStatus[key].state}`}><span className="refresh-state-icon">{refreshStatus[key].state === "running" ? <ArrowClockwise className="spin" size={14}/> : refreshStatus[key].state === "error" ? <Warning size={14}/> : refreshStatus[key].updatedAt ? <Check size={14}/> : "·"}</span><div><strong>{label}</strong><small>{refreshLabel(key)}</small></div></div>)}
+            {[["signals", "盘中候选"], ["confirmed", "收盘确认"], ["watchlist", "我的自选"]].map(([key, label]) => {
+              const status = refreshStatus[key];
+              const determinate = Number.isFinite(status.progress);
+              return <div key={key} className={`refresh-item ${status.state}`}><span className="refresh-state-icon">{status.state === "running" ? <ArrowClockwise className="spin" size={14}/> : status.state === "error" ? <Warning size={14}/> : status.updatedAt ? <Check size={14}/> : "·"}</span><div><strong>{label}{status.state === "running" && determinate ? ` ${status.progress}%` : ""}</strong><small>{status.state === "running" ? status.message || "刷新中" : refreshLabel(key)}</small><span className={`refresh-progress ${status.state === "running" && !determinate ? "indeterminate" : ""}`} aria-label={status.state === "running" ? `${label}刷新进度` : undefined} aria-valuenow={determinate ? status.progress : undefined} role={status.state === "running" ? "progressbar" : undefined}><i style={{ width: `${determinate ? status.progress : status.state === "done" ? 100 : 0}%` }} /></span></div></div>;
+            })}
           </div>
           <div className={`scan-strip ${scanSummary.state}`}>
             {fullScan.status === "running" && `正在刷新${clock.afterClose ? "收盘确认" : "盘中候选"}：${fullScan.offset.toLocaleString()} / ${fullScan.total.toLocaleString()}（${fullScan.total ? Math.round(fullScan.offset / fullScan.total * 100) : 0}%）· 当前列表 ${signalStocks.length} 只 · 数据失败 ${fullScan.failed} 只`}
