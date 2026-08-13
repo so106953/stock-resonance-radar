@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { StockSDK, type FullQuote } from "stock-sdk";
+
+const stockSdk = new StockSDK({ timeout: 8_000 });
 
 const QUOTE_URLS = [
   "https://push2.eastmoney.com/api/qt/clist/get",
@@ -124,13 +127,71 @@ async function loadTencentQuotes() {
   return rows;
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label}超时（${timeoutMs / 1000}秒）`)), timeoutMs)),
+  ]);
+}
+
+function normalizeStockSdkQuote(row: FullQuote) {
+  return {
+    code: String(row.code).replace(/\D/g, "").slice(-6),
+    name: row.name || row.code,
+    price: Number(row.price || 0),
+    previousClose: Number(row.prevClose || 0),
+    open: Number(row.open || 0),
+    volume: Number(row.volume2 || row.volume || 0),
+    amount: Number(row.amount || 0) * 10_000,
+    changePercent: Number(row.changePercent || 0),
+    high: Number(row.high || 0),
+    low: Number(row.low || 0),
+    volumeRatio: Number(row.volumeRatio || 0),
+    marketCap: Number(row.totalMarketCap || 0) * 100_000_000,
+    upstream: row.source,
+  };
+}
+
+async function loadStockSdkQuotes() {
+  const rows = await withTimeout(stockSdk.batch.cn({ batchSize: 400, concurrency: 3 }), 18_000, "Stock SDK 全市场行情");
+  const normalized = rows.map(normalizeStockSdkQuote).filter(row => /^\d{6}$/.test(row.code) && row.price > 0);
+  if (normalized.length < 1000) throw new Error(`Stock SDK 全市场仅取得 ${normalized.length} 只`);
+  return normalized;
+}
+
+async function loadStockSdkCodeQuotes(codes: string[]) {
+  const symbols = codes.map(code => `${code.startsWith("6") ? "sh" : code.startsWith("8") || code.startsWith("4") || code.startsWith("92") ? "bj" : "sz"}${code}`);
+  const rows = await withTimeout(stockSdk.batch.byCodes(symbols, { batchSize: 80, concurrency: 2 }), 10_000, "Stock SDK 指定股票行情");
+  const normalized = rows.map(normalizeStockSdkQuote).filter(row => codes.includes(row.code) && row.price > 0);
+  if (!normalized.length) throw new Error("Stock SDK 未取得指定股票行情");
+  return normalized;
+}
+
+async function loadPreferredCodeQuotes(codes: string[]) {
+  try {
+    return { rows: await loadStockSdkCodeQuotes(codes), source: "stock-sdk", sourceLabel: "Stock SDK 实时行情（腾讯）" };
+  } catch (sdkError) {
+    return {
+      rows: await loadPythonTencentQuotes(codes),
+      source: "tencent-render",
+      sourceLabel: "腾讯实时行情 + Python 后备",
+      warning: sdkError instanceof Error ? sdkError.message : "Stock SDK 暂不可用",
+    };
+  }
+}
+
 async function loadAvailableQuotesUncached() {
-  try { return { rows: await loadQuotes(), source: "eastmoney-public", sourceLabel: "东方财富公开行情" }; }
-  catch (primaryError) {
-    const [pythonResult, tencentResult] = await Promise.allSettled([loadPythonQuotes(), loadTencentQuotes()]);
-    if (pythonResult.status === "fulfilled") return { rows: pythonResult.value, source: "akshare-render", sourceLabel: "AKShare 免费行情", warning: primaryError instanceof Error ? primaryError.message : "主行情源不可用" };
-    if (tencentResult.status === "fulfilled") return { rows: tencentResult.value, source: "tencent-public", sourceLabel: "腾讯核心行情（覆盖有限）", warning: `全市场源暂不可用：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "Python 备用源失败"}` };
-    throw new Error(`东方财富：${primaryError instanceof Error ? primaryError.message : "不可用"}；AKShare：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "不可用"}；腾讯：${tencentResult.reason instanceof Error ? tencentResult.reason.message : "不可用"}`);
+  try {
+    return { rows: await loadStockSdkQuotes(), source: "stock-sdk", sourceLabel: "Stock SDK 全市场行情（腾讯/东财）" };
+  } catch (sdkError) {
+    try {
+      return { rows: await loadQuotes(), source: "eastmoney-public", sourceLabel: "东方财富公开行情", warning: sdkError instanceof Error ? sdkError.message : "Stock SDK 暂不可用" };
+    } catch (primaryError) {
+      const [pythonResult, tencentResult] = await Promise.allSettled([loadPythonQuotes(), loadTencentQuotes()]);
+      if (pythonResult.status === "fulfilled") return { rows: pythonResult.value, source: "akshare-render", sourceLabel: "AKShare 免费行情", warning: `Stock SDK：${sdkError instanceof Error ? sdkError.message : "不可用"}；东财：${primaryError instanceof Error ? primaryError.message : "不可用"}` };
+      if (tencentResult.status === "fulfilled") return { rows: tencentResult.value, source: "tencent-public", sourceLabel: "腾讯核心行情（覆盖有限）", warning: `全市场源暂不可用：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "Python 备用源失败"}` };
+      throw new Error(`Stock SDK：${sdkError instanceof Error ? sdkError.message : "不可用"}；东方财富：${primaryError instanceof Error ? primaryError.message : "不可用"}；AKShare：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "不可用"}；腾讯：${tencentResult.reason instanceof Error ? tencentResult.reason.message : "不可用"}`);
+    }
   }
 }
 
@@ -147,6 +208,18 @@ async function loadAvailableQuotes(force = false) {
 }
 
 async function fetchHistoryUncached(code: string): Promise<HistoryBar[]> {
+  try {
+    const symbol = `${code.startsWith("6") ? "sh" : code.startsWith("8") || code.startsWith("4") || code.startsWith("92") ? "bj" : "sz"}${code}`;
+    const rows = await withTimeout(stockSdk.kline.cn(symbol, { period: "daily", adjust: "qfq" }), 10_000, "Stock SDK 日K");
+    const normalized = rows
+      .filter(row => row.open != null && row.close != null && row.high != null && row.low != null && row.volume != null)
+      .map(row => ({ date: row.date, open: Number(row.open), close: Number(row.close), high: Number(row.high), low: Number(row.low), volume: Number(row.volume), amount: Number(row.amount || 0) }))
+      .slice(-180);
+    if (normalized.length >= 70) return normalized;
+    throw new Error(`Stock SDK 日K不足：${normalized.length}`);
+  } catch {
+    // 继续使用现有 Python、百度和东方财富后备链路。
+  }
   const market = code.startsWith("6") ? "1" : "0";
   const query = new URLSearchParams({ secid: `${market}.${code}`, klt: "101", fqt: "1", lmt: "140", end: "20500101", fields1: "f1,f2,f3,f4,f5,f6", fields2: "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61" });
   const base = pythonDataApi();
@@ -252,7 +325,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
       const requested = url.searchParams.get("limit") || "60";
       const requestedCodes = (url.searchParams.get("codes") || "").split(",").filter(code => /^\d{6}$/.test(code)).slice(0, 100);
       const quoteResult = requestedCodes.length
-        ? { rows: await loadPythonTencentQuotes(requestedCodes), source: "tencent-render", sourceLabel: "腾讯实时行情 + 百度日K" }
+        ? await loadPreferredCodeQuotes(requestedCodes)
         : await loadAvailableQuotes();
       const quotes = quoteResult.rows;
       const codeSet = new Set(requestedCodes);
