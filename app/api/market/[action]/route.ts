@@ -38,6 +38,39 @@ type QuoteBody = { data?: { total?: number; diff?: Record<string, unknown>[] | R
 type QuoteResult = Awaited<ReturnType<typeof loadAvailableQuotesUncached>>;
 let quoteCache: { expiresAt: number; value: QuoteResult } | null = null;
 let quoteRequest: Promise<QuoteResult> | null = null;
+const historyCache = new Map<string, { expiresAt: number; value: HistoryBar[] }>();
+const historyRequests = new Map<string, Promise<HistoryBar[]>>();
+type HistoryBar = { date: string; open: number; close: number; high: number; low: number; volume: number; amount: number };
+
+function pythonDataApi() {
+  return String(process.env.PYTHON_DATA_API || "").replace(/\/$/, "");
+}
+
+async function loadPythonQuotes() {
+  const base = pythonDataApi();
+  if (!base) throw new Error("Python 备用源未配置");
+  const response = await fetchWithRetry(`${base}/api/quotes`, 1, 12_000);
+  const body = await response.json() as { data?: Record<string, unknown>[] };
+  const rows = Array.isArray(body.data) ? body.data
+    .filter(item => /^\d{6}$/.test(String(item.code || "")))
+    .map(item => ({ ...item, volume: Number(item.volume || item.amount || 0) })) : [];
+  if (rows.length < 100) throw new Error(`Python 行情仅取得 ${rows.length} 只`);
+  return rows;
+}
+
+async function loadPythonTencentQuotes(codes: string[]) {
+  const base = pythonDataApi();
+  if (!base) throw new Error("Python 数据源未配置");
+  if (!codes.length || codes.length > 100) throw new Error("腾讯批量行情须为1到100只");
+  const response = await fetchWithRetry(`${base}/api/tencent-quotes?codes=${encodeURIComponent(codes.join(","))}`, 2, 15_000);
+  const body = await response.json() as { data?: Record<string, unknown>[]; detail?: string };
+  const rows = Array.isArray(body.data) ? body.data
+    .filter(item => /^\d{6}$/.test(String(item.code || "")))
+    // 当前腾讯后端以成交额为主要活跃度字段；补成非零volume，避免被误判为停牌。
+    .map(item => ({ ...item, volume: Number(item.volume || item.amount || 0) })) : [];
+  if (!rows.length) throw new Error(body.detail || "腾讯批量行情返回空数据");
+  return rows;
+}
 
 async function loadQuotePage(page: number, pageSize = 500) {
   const query = new URLSearchParams({ pn: String(page), pz: String(pageSize), po: "1", np: "1", fltt: "2", invt: "2", fid: "f3", fs: "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", fields: "f2,f3,f5,f6,f10,f12,f14,f15,f16,f17,f18,f20" });
@@ -94,18 +127,10 @@ async function loadTencentQuotes() {
 async function loadAvailableQuotesUncached() {
   try { return { rows: await loadQuotes(), source: "eastmoney-public", sourceLabel: "东方财富公开行情" }; }
   catch (primaryError) {
-    try { return { rows: await loadTencentQuotes(), source: "tencent-public", sourceLabel: "腾讯公开行情", warning: primaryError instanceof Error ? primaryError.message : "主行情源不可用" }; }
-    catch (secondaryError) {
-      const pythonApi = process.env.PYTHON_DATA_API?.replace(/\/$/, "");
-      if (pythonApi) {
-        try {
-          const response = await fetchWithRetry(`${pythonApi}/api/quotes`, 2, 60_000);
-          const body = await response.json() as { data?: Record<string, unknown>[] };
-          if (Array.isArray(body.data) && body.data.length >= 100) return { rows: body.data, source: "akshare-python", sourceLabel: "AKShare全市场补充", warning: "公开行情主备源不可用" };
-        } catch { /* Return the combined primary error below. */ }
-      }
-      throw new Error(`东方财富：${primaryError instanceof Error ? primaryError.message : "不可用"}；腾讯：${secondaryError instanceof Error ? secondaryError.message : "不可用"}`);
-    }
+    const [pythonResult, tencentResult] = await Promise.allSettled([loadPythonQuotes(), loadTencentQuotes()]);
+    if (pythonResult.status === "fulfilled") return { rows: pythonResult.value, source: "akshare-render", sourceLabel: "AKShare 免费行情", warning: primaryError instanceof Error ? primaryError.message : "主行情源不可用" };
+    if (tencentResult.status === "fulfilled") return { rows: tencentResult.value, source: "tencent-public", sourceLabel: "腾讯核心行情（覆盖有限）", warning: `全市场源暂不可用：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "Python 备用源失败"}` };
+    throw new Error(`东方财富：${primaryError instanceof Error ? primaryError.message : "不可用"}；AKShare：${pythonResult.reason instanceof Error ? pythonResult.reason.message : "不可用"}；腾讯：${tencentResult.reason instanceof Error ? tencentResult.reason.message : "不可用"}`);
   }
 }
 
@@ -121,32 +146,40 @@ async function loadAvailableQuotes(force = false) {
   } finally { quoteRequest = null; }
 }
 
-async function loadHistory(code: string) {
+async function fetchHistoryUncached(code: string): Promise<HistoryBar[]> {
   const market = code.startsWith("6") ? "1" : "0";
   const query = new URLSearchParams({ secid: `${market}.${code}`, klt: "101", fqt: "1", lmt: "140", end: "20500101", fields1: "f1,f2,f3,f4,f5,f6", fields2: "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61" });
-  let body: { data?: { klines?: string[] } } | null = null;
-  let lastError = "历史行情不可用";
-  for (const endpoint of HISTORY_URLS) {
-    try {
-      const response = await fetchWithRetry(`${endpoint}?${query}`);
-      if (!response.ok) { lastError = `历史行情返回 ${response.status}`; continue; }
-      body = await response.json() as { data?: { klines?: string[] } };
-      if (Array.isArray(body.data?.klines)) break;
-    } catch (error) { lastError = error instanceof Error ? error.message : "历史行情异常"; }
+  const base = pythonDataApi();
+  try {
+    if (!base) throw new Error("Python 备用源未配置");
+    const response = await fetchWithRetry(`${base}/api/history/${code}`, 2, 15_000);
+    const body = await response.json() as { data?: HistoryBar[]; detail?: string };
+    if (!Array.isArray(body.data) || body.data.length < 70) throw new Error(body.detail || "百度日K不足");
+    return body.data.map(row => ({ date: String(row.date), open: Number(row.open), close: Number(row.close), high: Number(row.high), low: Number(row.low), volume: Number(row.volume), amount: Number(row.amount || 0) }));
+  } catch (pythonError) {
+    const eastmoneyTasks = HISTORY_URLS.map(async endpoint => {
+      const response = await fetchWithRetry(`${endpoint}?${query}`, 1, 5000);
+      const body = await response.json() as { data?: { klines?: string[] } };
+      if (!Array.isArray(body.data?.klines) || body.data.klines.length < 70) throw new Error("东财历史行情不足");
+      return body.data.klines.map(line => { const [date, open, close, high, low, volume, amount] = line.split(","); return { date, open: Number(open), close: Number(close), high: Number(high), low: Number(low), volume: Number(volume), amount: Number(amount) }; });
+    });
+    try { return await Promise.any(eastmoneyTasks); }
+    catch { throw new Error(`百度日K失败：${pythonError instanceof Error ? pythonError.message : "未知错误"}；东财后备也不可用`); }
   }
-  if (!body) {
-    const pythonApi = process.env.PYTHON_DATA_API?.replace(/\/$/, "");
-    if (pythonApi) {
-      try {
-        const response = await fetchWithRetry(`${pythonApi}/api/history/${code}`, 2, 60_000);
-        const fallback = await response.json() as { data?: { date: string; open: number; close: number; high: number; low: number; volume: number; amount: number }[] };
-        if (Array.isArray(fallback.data) && fallback.data.length >= 70) return fallback.data;
-      } catch { /* Preserve the original history error. */ }
-    }
-    throw new Error(lastError);
-  }
-  if (!Array.isArray(body.data?.klines) || body.data.klines.length < 70) throw new Error("历史行情不足");
-  return body.data.klines.map(line => { const [date, open, close, high, low, volume, amount] = line.split(","); return { date, open: Number(open), close: Number(close), high: Number(high), low: Number(low), volume: Number(volume), amount: Number(amount) }; });
+}
+
+async function loadHistory(code: string) {
+  const cached = historyCache.get(code);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const pending = historyRequests.get(code);
+  if (pending) return pending;
+  const request = fetchHistoryUncached(code);
+  historyRequests.set(code, request);
+  try {
+    const value = await request;
+    historyCache.set(code, { value, expiresAt: Date.now() + 6 * 3600_000 });
+    return value;
+  } finally { historyRequests.delete(code); }
 }
 
 function strategyFrom(url: URL) {
@@ -216,10 +249,12 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
     const started = Date.now();
     try {
       const session = marketSession();
-      const quoteResult = await loadAvailableQuotes();
-      const quotes = quoteResult.rows;
       const requested = url.searchParams.get("limit") || "60";
       const requestedCodes = (url.searchParams.get("codes") || "").split(",").filter(code => /^\d{6}$/.test(code)).slice(0, 100);
+      const quoteResult = requestedCodes.length
+        ? { rows: await loadPythonTencentQuotes(requestedCodes), source: "tencent-render", sourceLabel: "腾讯实时行情 + 百度日K" }
+        : await loadAvailableQuotes();
+      const quotes = quoteResult.rows;
       const codeSet = new Set(requestedCodes);
       const limit = requestedCodes.length ? requestedCodes.length : requested === "batch" ? 300 : Math.min(Math.max(Number(requested) || 60, 1), 200);
       const eligible = quotes.filter(row => Number(row.price) > 0 && Number(row.volume) > 0).filter(row => {
@@ -232,14 +267,15 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
         ? eligible.filter(row => codeSet.has(row.code))
         : eligible.filter(row => Number(row.amount) > 0).filter(row => !strategy.excludeST || !row.name.includes("ST")).filter(row => Number(row.changePercent) <= strategy.maxRise).sort((a,b) => Number(b.amount)-Number(a.amount)))
         .slice(0, limit);
-      const results: Record<string, any>[] = []; let cursor = 0; let failed = 0;
-      async function worker() { while (cursor < pool.length) { const quote = pool[cursor++]; try { const bars = await loadHistory(quote.code); if (bars.length >= strategy.minDays) results.push(analyze(quote, bars, strategy)); else failed++; } catch { failed++; } } }
-      await Promise.all(Array.from({ length: requested === "batch" ? 12 : 8 }, worker));
+      const results: Record<string, any>[] = []; const failedDetails: { code: string; reason: string }[] = []; let cursor = 0; let failed = 0;
+      async function worker() { while (cursor < pool.length) { const quote = pool[cursor++]; try { const bars = await loadHistory(quote.code); if (bars.length >= strategy.minDays) results.push(analyze(quote, bars, strategy)); else { failed++; failedDetails.push({ code: quote.code, reason: `历史数据不足：${bars.length}` }); } } catch (error) { failed++; failedDetails.push({ code: quote.code, reason: error instanceof Error ? error.message : "历史数据请求失败" }); } } }
+      // 免费实例资源有限。全市场小批次使用2路，普通扫描最多4路。
+      await Promise.all(Array.from({ length: requestedCodes.length ? 2 : 4 }, worker));
       results.sort((a,b) => b.score-a.score); const matches = results.filter(item => item.matched).map(item => ({ ...item, signalState: session.signalState }));
       const nearMatches = results.filter(item => item.nearMatch).slice(0, 80).map(item => ({ ...item, signalState: session.signalState === "confirmed" ? "near-confirmed" : "near-intraday" }));
       const attempted = pool.length; const completeness = attempted ? Math.round(results.length / attempted * 100) : 0;
       const sessionDate = String(results.find(item => item.barDate)?.barDate || new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date()));
-      return NextResponse.json({ source: quoteResult.source, sourceLabel: quoteResult.sourceLabel, fallback: false, scanMode: session.label, signalState: session.signalState, sessionDate, attempted, scanned: results.length, failed, completeness, quoteCoverage: quotes.length, matched: matches.length, nearMatched: nearMatches.length, durationMs: Date.now()-started, updatedAt: new Date().toISOString(), data: matches, nearMatches, leaders: results.slice(0,60), strategy });
+      return NextResponse.json({ source: quoteResult.source, sourceLabel: quoteResult.sourceLabel, fallback: false, scanMode: session.label, signalState: session.signalState, sessionDate, attempted, scanned: results.length, failed, failedDetails: failedDetails.slice(0, 20), completeness, quoteCoverage: quotes.length, matched: matches.length, nearMatched: nearMatches.length, durationMs: Date.now()-started, updatedAt: new Date().toISOString(), data: matches, nearMatches, leaders: results.slice(0,60), strategy });
     } catch (error) { return NextResponse.json({ error: "真实扫描暂不可用", source: "unavailable", scanned: 0, matched: 0, warning: error instanceof Error ? error.message : "扫描不可用", data: [], leaders: [] }, { status: 503 }); }
   }
   if (action === "backtest") return NextResponse.json({ error: "真实回测功能正在接入，当前不提供模拟结果", source: "unavailable", code: url.searchParams.get("code"), data: null }, { status: 503 });
