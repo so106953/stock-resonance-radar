@@ -281,3 +281,72 @@
   from { transform: translateX(-115%); }
   to { transform: translateX(260%); }
 }
+
+
+/* Compact mobile header: keep the brand horizontal and give refresh its own row. */
+@media (max-width: 800px) {
+  .topbar {
+    min-height: 0;
+    padding: 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 42px 46px 42px;
+    gap: 10px;
+  }
+  .topbar .brand {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    gap: 10px;
+    font-size: 22px;
+    line-height: 1;
+  }
+  .topbar .brand strong {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .topbar .brand-mark {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+  }
+  .topbar .alerts-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+  }
+  .topbar .alerts-button {
+    width: 40px;
+    height: 40px;
+  }
+  .topbar .refresh-primary {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    height: 46px;
+    justify-content: center;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+  .topbar .search {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    height: 42px;
+  }
+  .topbar > .market,
+  .topbar > .clock-time,
+  .topbar > .clock-date,
+  .topbar > .coverage,
+  .topbar > .gold,
+  .topbar > .feed-live,
+  .topbar > .feed-fallback,
+  .topbar > .auto-scan,
+  .topbar > .mode-switch {
+    display: none;
+  }
+}
+
+@media (max-width: 360px) {
+  .topbar .brand { font-size: 20px; }
+  .topbar .refresh-primary { font-size: 13px; }
+}
